@@ -27,6 +27,7 @@ function DashboardContent() {
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
+  const [databaseProvider, setDatabaseProvider] = useState<"supabase" | "sqlite">("sqlite");
 
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState("");
@@ -58,6 +59,9 @@ function DashboardContent() {
           setLeads(data.data || []);
           if (data.stats) {
             setStats(data.stats);
+          }
+          if (data.database) {
+            setDatabaseProvider(data.database);
           }
         } else {
           throw new Error(data.error || "Failed to load leads");
@@ -321,6 +325,7 @@ function DashboardContent() {
         onRefresh={() => fetchLeads(true)}
         isRefreshing={isRefreshing}
         totalLeads={stats.totalLeads}
+        databaseProvider={databaseProvider}
       />
 
       {/* Main Container */}

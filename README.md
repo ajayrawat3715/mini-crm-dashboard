@@ -149,32 +149,41 @@ Open **[http://localhost:3000](http://localhost:3000)** in your browser to test 
 
 ## 🗄️ Database Setup Instructions
 
-### Option A: Local SQLite (Default, Recommended for Review)
+This project includes a **dual-engine database architecture**:
+1. **Supabase (Cloud PostgreSQL):** Fully integrated via `@supabase/supabase-js` and instant SQL migration script.
+2. **Local SQLite (Zero-Config):** Automatically enabled whenever Supabase credentials are not provided, allowing zero-friction offline execution for evaluators.
+
+---
+
+### Option A: Supabase Integration (Cloud Database)
+1. **Create a Free Project on Supabase:**
+   - Sign up or log in at [supabase.com](https://supabase.com) and create a new project.
+2. **Run the Database Schema:**
+   - In your Supabase dashboard, go to the **SQL Editor** (`/project/_/sql`).
+   - Open the provided [`supabase/schema.sql`](file:///Users/ajayrawat/Desktop/SHL_Project/supabase/schema.sql) file.
+   - Copy the SQL content, paste it into the Supabase SQL Editor, and click **Run**.
+   - This creates the `leads` table, indexes, RLS policies, and triggers.
+3. **Copy Your API Keys to `.env`:**
+   - In Supabase, navigate to **Project Settings** -> **API**.
+   - Copy the **Project URL** and **anon public key**.
+   - Add them to your `.env` file:
+     ```env
+     NEXT_PUBLIC_SUPABASE_URL="https://your-project-id.supabase.co"
+     NEXT_PUBLIC_SUPABASE_ANON_KEY="your-anon-public-key"
+     ```
+4. **Restart the Next.js Server:**
+   ```bash
+   npm run dev
+   ```
+   *The app automatically detects the keys, switches to Supabase, and displays `DB: Supabase` in the navigation bar!*
+
+---
+
+### Option B: Local SQLite (Default, Zero-Config)
 - Requires **no installation** or database server.
 - The database is stored locally in `prisma/dev.db`.
 - Run `npx prisma db push` to generate the file and table.
 - Run `npm run seed` to insert initial leads.
-
-### Option B: Cloud PostgreSQL / Supabase Setup
-If you prefer connecting to a hosted **Supabase** or **PostgreSQL** instance:
-1. Create a free PostgreSQL database on [Supabase](https://supabase.com) or [Neon](https://neon.tech).
-2. Copy your connection URI (e.g. `postgresql://postgres:[PASSWORD]@db.[REF].supabase.co:5432/postgres`).
-3. In `prisma/schema.prisma`, change datasource provider from `sqlite` to `postgresql`:
-   ```prisma
-   datasource db {
-     provider = "postgresql"
-     url      = env("DATABASE_URL")
-   }
-   ```
-4. In your `.env` file, update `DATABASE_URL`:
-   ```env
-   DATABASE_URL="postgresql://postgres:[PASSWORD]@db.[REF].supabase.co:5432/postgres"
-   ```
-5. Apply schema and seed:
-   ```bash
-   npx prisma db push
-   npm run seed
-   ```
 
 ---
 

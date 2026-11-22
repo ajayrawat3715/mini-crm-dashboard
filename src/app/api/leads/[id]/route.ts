@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import prisma from "@/lib/prisma";
+import { getLeadById, updateLead, deleteLead, getActiveDatabaseProvider } from "@/lib/db";
 import { validateLead } from "@/lib/validation";
 
 // GET /api/leads/[id] - Fetch a single lead
@@ -9,9 +9,7 @@ export async function GET(
 ) {
   try {
     const { id } = await params;
-    const lead = await prisma.lead.findUnique({
-      where: { id },
-    });
+    const lead = await getLeadById(id);
 
     if (!lead) {
       return NextResponse.json(
@@ -20,17 +18,22 @@ export async function GET(
       );
     }
 
-    return NextResponse.json({ success: true, data: lead });
-  } catch (error) {
+    return NextResponse.json({
+      success: true,
+      data: lead,
+      database: getActiveDatabaseProvider(),
+    });
+  } catch (error: unknown) {
     console.error("Error fetching single lead:", error);
+    const msg = error instanceof Error ? error.message : "Failed to retrieve lead";
     return NextResponse.json(
-      { success: false, error: "Failed to retrieve lead details." },
+      { success: false, error: msg },
       { status: 500 }
     );
   }
 }
 
-// PATCH /api/leads/[id] - Update an existing lead (full or partial update)
+// PATCH /api/leads/[id] - Update an existing lead
 export async function PATCH(
   request: NextRequest,
   { params }: { params: Promise<{ id: string }> }
@@ -39,11 +42,7 @@ export async function PATCH(
     const { id } = await params;
     const body = await request.json();
 
-    // Check if lead exists
-    const existing = await prisma.lead.findUnique({
-      where: { id },
-    });
-
+    const existing = await getLeadById(id);
     if (!existing) {
       return NextResponse.json(
         { success: false, error: `Lead with ID "${id}" not found.` },
@@ -51,7 +50,7 @@ export async function PATCH(
       );
     }
 
-    // Partial validation for provided fields
+    // Partial validation
     const { isValid, errors } = validateLead(body, true);
     if (!isValid) {
       return NextResponse.json(
@@ -64,30 +63,19 @@ export async function PATCH(
       );
     }
 
-    // Prepare update data
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const updateData: any = {};
-    if (body.name !== undefined) updateData.name = body.name.trim();
-    if (body.email !== undefined) updateData.email = body.email.trim().toLowerCase();
-    if (body.phone !== undefined) updateData.phone = body.phone.trim();
-    if (body.businessName !== undefined) updateData.businessName = body.businessName.trim();
-    if (body.status !== undefined) updateData.status = body.status;
-    if (body.notes !== undefined) updateData.notes = body.notes?.trim() || null;
-
-    const updatedLead = await prisma.lead.update({
-      where: { id },
-      data: updateData,
-    });
+    const updated = await updateLead(id, body);
 
     return NextResponse.json({
       success: true,
       message: "Lead updated successfully",
-      data: updatedLead,
+      data: updated,
+      database: getActiveDatabaseProvider(),
     });
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("Error updating lead:", error);
+    const msg = error instanceof Error ? error.message : "Failed to update lead";
     return NextResponse.json(
-      { success: false, error: "An unexpected error occurred while updating the lead." },
+      { success: false, error: msg },
       { status: 500 }
     );
   }
@@ -101,10 +89,7 @@ export async function DELETE(
   try {
     const { id } = await params;
 
-    const existing = await prisma.lead.findUnique({
-      where: { id },
-    });
-
+    const existing = await getLeadById(id);
     if (!existing) {
       return NextResponse.json(
         { success: false, error: `Lead with ID "${id}" not found.` },
@@ -112,18 +97,18 @@ export async function DELETE(
       );
     }
 
-    await prisma.lead.delete({
-      where: { id },
-    });
+    await deleteLead(id);
 
     return NextResponse.json({
       success: true,
       message: `Lead "${existing.name}" successfully deleted.`,
+      database: getActiveDatabaseProvider(),
     });
-  } catch (error) {
+  } catch (error: unknown) {
     console.error("Error deleting lead:", error);
+    const msg = error instanceof Error ? error.message : "Failed to delete lead";
     return NextResponse.json(
-      { success: false, error: "Failed to delete the lead." },
+      { success: false, error: msg },
       { status: 500 }
     );
   }

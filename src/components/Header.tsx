@@ -9,6 +9,7 @@ interface HeaderProps {
   onRefresh: () => void;
   isRefreshing?: boolean;
   totalLeads: number;
+  databaseProvider?: "supabase" | "sqlite";
 }
 
 export default function Header({
@@ -17,6 +18,7 @@ export default function Header({
   onRefresh,
   isRefreshing = false,
   totalLeads,
+  databaseProvider = "sqlite",
 }: HeaderProps) {
   return (
     <header className="bg-white border-b border-slate-200 sticky top-0 z-20 backdrop-blur-md bg-white/95">
@@ -34,6 +36,29 @@ export default function Header({
                 </h1>
                 <span className="hidden sm:inline-flex items-center px-2 py-0.5 rounded-full text-[10px] font-semibold bg-indigo-50 text-indigo-700 border border-indigo-200">
                   SHL Task 1
+                </span>
+                <span
+                  title={
+                    databaseProvider === "supabase"
+                      ? "Connected to cloud Supabase PostgreSQL"
+                      : "Connected to local SQLite database (zero-config)"
+                  }
+                  className={`hidden md:inline-flex items-center gap-1.5 px-2 py-0.5 rounded-full text-[10px] font-semibold border ${
+                    databaseProvider === "supabase"
+                      ? "bg-emerald-50 text-emerald-700 border-emerald-200"
+                      : "bg-slate-100 text-slate-700 border-slate-200"
+                  }`}
+                >
+                  <span
+                    className={`w-1.5 h-1.5 rounded-full ${
+                      databaseProvider === "supabase"
+                        ? "bg-emerald-500 animate-pulse"
+                        : "bg-slate-400"
+                    }`}
+                  />
+                  <span>
+                    DB: {databaseProvider === "supabase" ? "Supabase" : "SQLite"}
+                  </span>
                 </span>
               </div>
               <p className="text-xs text-slate-500 hidden sm:block">
