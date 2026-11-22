@@ -6,7 +6,7 @@
 
 ## 🚀 Live Demo & Repository
 - **Live Demo:** [Deploy on Vercel / Live Demo Link](https://mini-crm-dashboard-shl.vercel.app) *(or test locally in 60 seconds)*
-- **GitHub Repository:** [https://github.com/your-username/mini-crm-dashboard](https://github.com/your-username/mini-crm-dashboard)
+- **GitHub Repository:** [https://github.com/ajayrawat3715/mini-crm-dashboard](https://github.com/ajayrawat3715/mini-crm-dashboard)
 
 ---
 
@@ -116,7 +116,7 @@ SHL_Project/
 
 ### Step 1: Clone the repository
 ```bash
-git clone https://github.com/your-username/mini-crm-dashboard.git
+git clone https://github.com/ajayrawat3715/mini-crm-dashboard.git
 cd mini-crm-dashboard
 ```
 
