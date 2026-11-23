@@ -3,7 +3,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Lead, LeadStatus, LeadStats } from "@/types/lead";
 import { ToastProvider, useToast } from "@/components/Toast";
-import { supabaseClient } from "@/lib/supabase";
+import { supabaseClient } from "@/lib/supabase-client";
 import Header from "@/components/Header";
 import StatsOverview from "@/components/StatsOverview";
 import SearchAndFilter from "@/components/SearchAndFilter";

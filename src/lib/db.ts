@@ -1,5 +1,5 @@
 import prisma from "@/lib/prisma";
-import { supabaseServer, isSupabaseConfigured } from "@/lib/supabase";
+import { supabaseServer, isSupabaseConfigured, SUPABASE_URL, SUPABASE_KEY } from "@/lib/supabase";
 import { Lead, LeadStatus, LeadStats } from "@/types/lead";
 import { SAMPLE_LEADS } from "@/lib/seed-data";
 
@@ -7,6 +7,21 @@ export type DatabaseProvider = "supabase" | "sqlite";
 
 export function getActiveDatabaseProvider(): DatabaseProvider {
   return isSupabaseConfigured ? "supabase" : "sqlite";
+}
+
+// Helper for raw PostgREST requests with connection-close to prevent serverless socket issues
+async function rawSupabaseRequest(endpoint: string, options: RequestInit = {}) {
+  const url = `${SUPABASE_URL}/rest/v1/${endpoint}`;
+  return fetch(url, {
+    ...options,
+    headers: {
+      apikey: SUPABASE_KEY,
+      Authorization: `Bearer ${SUPABASE_KEY}`,
+      Connection: "close",
+      "User-Agent": "Mozilla/5.0 (compatible; MiniCRM/1.0)",
+      ...options.headers,
+    },
+  });
 }
 
 // Helper to convert Supabase snake_case row to Lead model
@@ -79,9 +94,23 @@ export async function getLeads(
 
         return { leads, stats, provider: "supabase" };
       }
-      console.warn("Supabase query error, falling back to SQLite:", filteredRes.error || allRes.error);
     } catch (err) {
-      console.warn("Supabase getLeads exception, falling back to SQLite:", err);
+      console.warn("Supabase getLeads exception, trying raw REST:", err);
+    }
+
+    // Raw REST fallback
+    try {
+      let endpoint = "leads?select=*&order=created_at.desc";
+      if (status && status !== "All") endpoint += `&status=eq.${encodeURIComponent(status)}`;
+      const res = await rawSupabaseRequest(endpoint);
+      if (res.ok) {
+        const rows = await res.json();
+        const leads: Lead[] = rows.map(mapSupabaseRowToLead);
+        const stats = computeStats(leads);
+        return { leads, stats, provider: "supabase" };
+      }
+    } catch (rawErr) {
+      console.warn("Raw REST getLeads failed:", rawErr);
     }
   }
 
@@ -123,14 +152,29 @@ export async function getLeads(
 // ==========================================
 export async function getLeadById(id: string): Promise<Lead | null> {
   if (supabaseServer) {
-    const { data, error } = await supabaseServer
-      .from("leads")
-      .select("*")
-      .eq("id", id)
-      .single();
+    try {
+      const { data, error } = await supabaseServer
+        .from("leads")
+        .select("*")
+        .eq("id", id)
+        .single();
 
-    if (error || !data) return null;
-    return mapSupabaseRowToLead(data);
+      if (!error && data) return mapSupabaseRowToLead(data);
+    } catch (err) {
+      console.warn("getLeadById exception, trying raw REST:", err);
+    }
+
+    try {
+      const res = await rawSupabaseRequest(`leads?id=eq.${id}&select=*`);
+      if (res.ok) {
+        const rows = await res.json();
+        if (Array.isArray(rows) && rows.length > 0) {
+          return mapSupabaseRowToLead(rows[0]);
+        }
+      }
+    } catch (rawErr) {
+      console.warn("Raw REST getLeadById failed:", rawErr);
+    }
   }
 
   if (process.env.DATABASE_URL) {
@@ -158,66 +202,65 @@ export async function createLead(data: {
   status: LeadStatus;
   notes?: string;
 }): Promise<Lead> {
+  const payload = {
+    name: data.name.trim(),
+    email: data.email.trim().toLowerCase(),
+    phone: data.phone.trim(),
+    business_name: data.businessName.trim(),
+    status: data.status || "New",
+    notes: data.notes?.trim() || null,
+  };
+
   if (supabaseServer) {
     try {
       const { data: inserted, error } = await supabaseServer
         .from("leads")
-        .insert({
-          name: data.name.trim(),
-          email: data.email.trim().toLowerCase(),
-          phone: data.phone.trim(),
-          business_name: data.businessName.trim(),
-          status: data.status || "New",
-          notes: data.notes?.trim() || null,
-        })
+        .insert(payload)
         .select()
         .single();
 
       if (!error && inserted) {
         return mapSupabaseRowToLead(inserted);
       }
-      if (error) {
-        console.error("Supabase createLead returned error:", error);
-        throw new Error(`Supabase error: ${error.message}`);
-      }
     } catch (err) {
-      console.warn("Supabase createLead exception:", err);
-      // SQLite fallback only if DATABASE_URL is explicitly set
-      if (process.env.DATABASE_URL) {
-        try {
-          const created = await prisma.lead.create({
-            data: {
-              name: data.name.trim(),
-              email: data.email.trim().toLowerCase(),
-              phone: data.phone.trim(),
-              businessName: data.businessName.trim(),
-              status: data.status || "New",
-              notes: data.notes?.trim() || null,
-            },
-          });
-          return {
-            ...created,
-            status: created.status as LeadStatus,
-            createdAt: created.createdAt.toISOString(),
-            updatedAt: created.updatedAt.toISOString(),
-          };
-        } catch (prismaErr) {
-          console.error("Prisma SQLite fallback failed:", prismaErr);
+      console.warn("supabaseServer.insert threw, attempting raw REST fallback:", err);
+    }
+
+    // Direct Raw REST fallback to PostgREST
+    try {
+      const res = await rawSupabaseRequest("leads", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Prefer: "return=representation",
+        },
+        body: JSON.stringify(payload),
+      });
+
+      if (res.ok) {
+        const rows = await res.json();
+        if (Array.isArray(rows) && rows.length > 0) {
+          return mapSupabaseRowToLead(rows[0]);
         }
+      } else {
+        const errText = await res.text();
+        console.warn("Raw REST insert returned non-ok:", res.status, errText);
       }
-      throw err;
+    } catch (rawErr) {
+      console.warn("rawSupabaseRequest insert failed:", rawErr);
     }
   }
 
+  // SQLite fallback only if DATABASE_URL exists (local dev)
   if (process.env.DATABASE_URL) {
     const created = await prisma.lead.create({
       data: {
-        name: data.name.trim(),
-        email: data.email.trim().toLowerCase(),
-        phone: data.phone.trim(),
-        businessName: data.businessName.trim(),
-        status: data.status || "New",
-        notes: data.notes?.trim() || null,
+        name: payload.name,
+        email: payload.email,
+        phone: payload.phone,
+        businessName: payload.business_name,
+        status: payload.status as LeadStatus,
+        notes: payload.notes,
       },
     });
 
@@ -246,17 +289,17 @@ export async function updateLead(
     notes?: string;
   }>
 ): Promise<Lead> {
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const updatePayload: any = {};
+  if (data.name !== undefined) updatePayload.name = data.name.trim();
+  if (data.email !== undefined) updatePayload.email = data.email.trim().toLowerCase();
+  if (data.phone !== undefined) updatePayload.phone = data.phone.trim();
+  if (data.businessName !== undefined) updatePayload.business_name = data.businessName.trim();
+  if (data.status !== undefined) updatePayload.status = data.status;
+  if (data.notes !== undefined) updatePayload.notes = data.notes?.trim() || null;
+
   if (supabaseServer) {
     try {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      const updatePayload: any = {};
-      if (data.name !== undefined) updatePayload.name = data.name.trim();
-      if (data.email !== undefined) updatePayload.email = data.email.trim().toLowerCase();
-      if (data.phone !== undefined) updatePayload.phone = data.phone.trim();
-      if (data.businessName !== undefined) updatePayload.business_name = data.businessName.trim();
-      if (data.status !== undefined) updatePayload.status = data.status;
-      if (data.notes !== undefined) updatePayload.notes = data.notes?.trim() || null;
-
       const { data: updated, error } = await supabaseServer
         .from("leads")
         .update(updatePayload)
@@ -267,55 +310,42 @@ export async function updateLead(
       if (!error && updated) {
         return mapSupabaseRowToLead(updated);
       }
-      if (error) {
-        console.error("Supabase updateLead returned error:", error);
-        throw new Error(`Supabase error: ${error.message}`);
-      }
     } catch (err) {
-      console.warn("Supabase updateLead exception:", err);
-      if (process.env.DATABASE_URL) {
-        try {
-          // eslint-disable-next-line @typescript-eslint/no-explicit-any
-          const updatePayload: any = {};
-          if (data.name !== undefined) updatePayload.name = data.name.trim();
-          if (data.email !== undefined) updatePayload.email = data.email.trim().toLowerCase();
-          if (data.phone !== undefined) updatePayload.phone = data.phone.trim();
-          if (data.businessName !== undefined) updatePayload.businessName = data.businessName.trim();
-          if (data.status !== undefined) updatePayload.status = data.status;
-          if (data.notes !== undefined) updatePayload.notes = data.notes?.trim() || null;
+      console.warn("supabaseServer.update threw, attempting raw REST fallback:", err);
+    }
 
-          const updated = await prisma.lead.update({
-            where: { id },
-            data: updatePayload,
-          });
+    try {
+      const res = await rawSupabaseRequest(`leads?id=eq.${id}`, {
+        method: "PATCH",
+        headers: {
+          "Content-Type": "application/json",
+          Prefer: "return=representation",
+        },
+        body: JSON.stringify(updatePayload),
+      });
 
-          return {
-            ...updated,
-            status: updated.status as LeadStatus,
-            createdAt: updated.createdAt.toISOString(),
-            updatedAt: updated.updatedAt.toISOString(),
-          };
-        } catch (prismaErr) {
-          console.error("Prisma update fallback failed:", prismaErr);
+      if (res.ok) {
+        const rows = await res.json();
+        if (Array.isArray(rows) && rows.length > 0) {
+          return mapSupabaseRowToLead(rows[0]);
         }
       }
-      throw err;
+    } catch (rawErr) {
+      console.warn("rawSupabaseRequest update failed:", rawErr);
     }
   }
 
   if (process.env.DATABASE_URL) {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const updatePayload: any = {};
-    if (data.name !== undefined) updatePayload.name = data.name.trim();
-    if (data.email !== undefined) updatePayload.email = data.email.trim().toLowerCase();
-    if (data.phone !== undefined) updatePayload.phone = data.phone.trim();
-    if (data.businessName !== undefined) updatePayload.businessName = data.businessName.trim();
-    if (data.status !== undefined) updatePayload.status = data.status;
-    if (data.notes !== undefined) updatePayload.notes = data.notes?.trim() || null;
+    const prismaPayload: any = { ...updatePayload };
+    if (prismaPayload.business_name) {
+      prismaPayload.businessName = prismaPayload.business_name;
+      delete prismaPayload.business_name;
+    }
 
     const updated = await prisma.lead.update({
       where: { id },
-      data: updatePayload,
+      data: prismaPayload,
     });
 
     return {
@@ -337,15 +367,17 @@ export async function deleteLead(id: string): Promise<void> {
     try {
       const { error } = await supabaseServer.from("leads").delete().eq("id", id);
       if (!error) return;
-      console.error("Supabase deleteLead returned error:", error);
-      throw new Error(`Supabase error: ${error.message}`);
     } catch (err) {
-      console.warn("Supabase deleteLead exception:", err);
-      if (process.env.DATABASE_URL) {
-        await prisma.lead.delete({ where: { id } });
-        return;
-      }
-      throw err;
+      console.warn("supabaseServer.delete threw, trying raw REST:", err);
+    }
+
+    try {
+      const res = await rawSupabaseRequest(`leads?id=eq.${id}`, {
+        method: "DELETE",
+      });
+      if (res.ok) return;
+    } catch (rawErr) {
+      console.warn("rawSupabaseRequest delete failed:", rawErr);
     }
   }
 
@@ -362,9 +394,6 @@ export async function deleteLead(id: string): Promise<void> {
 // ==========================================
 export async function seedSampleLeads(): Promise<{ count: number; provider: DatabaseProvider }> {
   if (supabaseServer) {
-    // Clear existing
-    await supabaseServer.from("leads").delete().neq("id", "00000000-0000-0000-0000-000000000000");
-
     const rows = SAMPLE_LEADS.map((l) => ({
       name: l.name,
       email: l.email,
@@ -374,13 +403,30 @@ export async function seedSampleLeads(): Promise<{ count: number; provider: Data
       notes: l.notes || null,
     }));
 
-    const { error } = await supabaseServer.from("leads").insert(rows);
-    if (error) {
-      throw new Error(`Failed to seed Supabase: ${error.message}`);
+    try {
+      await supabaseServer.from("leads").delete().neq("id", "00000000-0000-0000-0000-000000000000");
+      const { error } = await supabaseServer.from("leads").insert(rows);
+      if (!error) {
+        const { count } = await supabaseServer.from("leads").select("*", { count: "exact", head: true });
+        return { count: count || SAMPLE_LEADS.length, provider: "supabase" };
+      }
+    } catch (err) {
+      console.warn("supabaseServer.seed threw, trying raw REST:", err);
     }
 
-    const { count } = await supabaseServer.from("leads").select("*", { count: "exact", head: true });
-    return { count: count || SAMPLE_LEADS.length, provider: "supabase" };
+    try {
+      await rawSupabaseRequest("leads?id=neq.00000000-0000-0000-0000-000000000000", { method: "DELETE" });
+      const res = await rawSupabaseRequest("leads", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(rows),
+      });
+      if (res.ok) {
+        return { count: SAMPLE_LEADS.length, provider: "supabase" };
+      }
+    } catch (rawErr) {
+      console.warn("rawSupabaseRequest seed failed:", rawErr);
+    }
   }
 
   if (process.env.DATABASE_URL) {
