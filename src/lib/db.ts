@@ -51,40 +51,38 @@ export async function getLeads(
 ): Promise<{ leads: Lead[]; stats: LeadStats; provider: DatabaseProvider }> {
   // -------- SUPABASE (Primary Cloud Database) --------
   if (supabaseServer) {
-    let query = supabaseServer
-      .from("leads")
-      .select("*")
-      .order("created_at", { ascending: false });
+    try {
+      let query = supabaseServer
+        .from("leads")
+        .select("*")
+        .order("created_at", { ascending: false });
 
-    if (status && status !== "All") {
-      query = query.eq("status", status);
+      if (status && status !== "All") {
+        query = query.eq("status", status);
+      }
+
+      if (search) {
+        query = query.or(
+          `name.ilike.%${search}%,email.ilike.%${search}%,business_name.ilike.%${search}%,phone.ilike.%${search}%`
+        );
+      }
+
+      const [filteredRes, allRes] = await Promise.all([
+        query,
+        supabaseServer.from("leads").select("status"),
+      ]);
+
+      if (!filteredRes.error && !allRes.error) {
+        const leads: Lead[] = (filteredRes.data || []).map(mapSupabaseRowToLead);
+        const allLeads = allRes.data || [];
+        const stats = computeStats(allLeads);
+
+        return { leads, stats, provider: "supabase" };
+      }
+      console.warn("Supabase query error, falling back to SQLite:", filteredRes.error || allRes.error);
+    } catch (err) {
+      console.warn("Supabase getLeads exception, falling back to SQLite:", err);
     }
-
-    if (search) {
-      query = query.or(
-        `name.ilike.%${search}%,email.ilike.%${search}%,business_name.ilike.%${search}%,phone.ilike.%${search}%`
-      );
-    }
-
-    const [filteredRes, allRes] = await Promise.all([
-      query,
-      supabaseServer.from("leads").select("status"),
-    ]);
-
-    if (filteredRes.error) {
-      console.error("Supabase getLeads error:", filteredRes.error);
-      throw new Error(`Supabase query failed: ${filteredRes.error.message}`);
-    }
-    if (allRes.error) {
-      console.error("Supabase count error:", allRes.error);
-      throw new Error(`Supabase stats failed: ${allRes.error.message}`);
-    }
-
-    const leads: Lead[] = (filteredRes.data || []).map(mapSupabaseRowToLead);
-    const allLeads = allRes.data || [];
-    const stats = computeStats(allLeads);
-
-    return { leads, stats, provider: "supabase" };
   }
 
   // -------- SQLITE FALLBACK --------
@@ -142,7 +140,7 @@ export async function getLeadById(id: string): Promise<Lead | null> {
 }
 
 // ==========================================
-// 3. Create lead (Direct to Supabase)
+// 3. Create lead (Direct to Supabase with fallback)
 // ==========================================
 export async function createLead(data: {
   name: string;
@@ -153,29 +151,27 @@ export async function createLead(data: {
   notes?: string;
 }): Promise<Lead> {
   if (supabaseServer) {
-    const { data: inserted, error } = await supabaseServer
-      .from("leads")
-      .insert({
-        name: data.name.trim(),
-        email: data.email.trim().toLowerCase(),
-        phone: data.phone.trim(),
-        business_name: data.businessName.trim(),
-        status: data.status || "New",
-        notes: data.notes?.trim() || null,
-      })
-      .select()
-      .single();
+    try {
+      const { data: inserted, error } = await supabaseServer
+        .from("leads")
+        .insert({
+          name: data.name.trim(),
+          email: data.email.trim().toLowerCase(),
+          phone: data.phone.trim(),
+          business_name: data.businessName.trim(),
+          status: data.status || "New",
+          notes: data.notes?.trim() || null,
+        })
+        .select()
+        .single();
 
-    if (error) {
-      console.error("Supabase createLead error:", error);
-      throw new Error(`Failed to save to Supabase: ${error.message}`);
+      if (!error && inserted) {
+        return mapSupabaseRowToLead(inserted);
+      }
+      console.warn("Supabase createLead returned error, trying fallback:", error?.message);
+    } catch (err) {
+      console.warn("Supabase createLead exception, trying fallback:", err);
     }
-
-    if (!inserted) {
-      throw new Error("Supabase returned empty response on insert.");
-    }
-
-    return mapSupabaseRowToLead(inserted);
   }
 
   // SQLite fallback
@@ -213,28 +209,30 @@ export async function updateLead(
   }>
 ): Promise<Lead> {
   if (supabaseServer) {
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const updatePayload: any = {};
-    if (data.name !== undefined) updatePayload.name = data.name.trim();
-    if (data.email !== undefined) updatePayload.email = data.email.trim().toLowerCase();
-    if (data.phone !== undefined) updatePayload.phone = data.phone.trim();
-    if (data.businessName !== undefined) updatePayload.business_name = data.businessName.trim();
-    if (data.status !== undefined) updatePayload.status = data.status;
-    if (data.notes !== undefined) updatePayload.notes = data.notes?.trim() || null;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const updatePayload: any = {};
+      if (data.name !== undefined) updatePayload.name = data.name.trim();
+      if (data.email !== undefined) updatePayload.email = data.email.trim().toLowerCase();
+      if (data.phone !== undefined) updatePayload.phone = data.phone.trim();
+      if (data.businessName !== undefined) updatePayload.business_name = data.businessName.trim();
+      if (data.status !== undefined) updatePayload.status = data.status;
+      if (data.notes !== undefined) updatePayload.notes = data.notes?.trim() || null;
 
-    const { data: updated, error } = await supabaseServer
-      .from("leads")
-      .update(updatePayload)
-      .eq("id", id)
-      .select()
-      .single();
+      const { data: updated, error } = await supabaseServer
+        .from("leads")
+        .update(updatePayload)
+        .eq("id", id)
+        .select()
+        .single();
 
-    if (error) {
-      console.error("Supabase updateLead error:", error);
-      throw new Error(`Failed to update in Supabase: ${error.message}`);
+      if (!error && updated) {
+        return mapSupabaseRowToLead(updated);
+      }
+      console.warn("Supabase updateLead returned error, trying fallback:", error?.message);
+    } catch (err) {
+      console.warn("Supabase updateLead exception, trying fallback:", err);
     }
-
-    return mapSupabaseRowToLead(updated);
   }
 
   // SQLite fallback
@@ -265,12 +263,13 @@ export async function updateLead(
 // ==========================================
 export async function deleteLead(id: string): Promise<void> {
   if (supabaseServer) {
-    const { error } = await supabaseServer.from("leads").delete().eq("id", id);
-    if (error) {
-      console.error("Supabase deleteLead error:", error);
-      throw new Error(`Failed to delete from Supabase: ${error.message}`);
+    try {
+      const { error } = await supabaseServer.from("leads").delete().eq("id", id);
+      if (!error) return;
+      console.warn("Supabase deleteLead error, trying fallback:", error.message);
+    } catch (err) {
+      console.warn("Supabase deleteLead exception, trying fallback:", err);
     }
-    return;
   }
 
   await prisma.lead.delete({ where: { id } });

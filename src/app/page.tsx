@@ -3,6 +3,7 @@
 import React, { useState, useEffect, useCallback, useMemo } from "react";
 import { Lead, LeadStatus, LeadStats } from "@/types/lead";
 import { ToastProvider, useToast } from "@/components/Toast";
+import { supabaseClient } from "@/lib/supabase";
 import Header from "@/components/Header";
 import StatsOverview from "@/components/StatsOverview";
 import SearchAndFilter from "@/components/SearchAndFilter";
@@ -11,6 +12,39 @@ import LeadModal from "@/components/LeadModal";
 import DeleteConfirmModal from "@/components/DeleteConfirmModal";
 import EmptyState from "@/components/EmptyState";
 import { StatsSkeleton, TableSkeleton } from "@/components/SkeletonLoader";
+
+// Helper to normalize Supabase row to Lead model
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+function mapRowToLead(row: any): Lead {
+  return {
+    id: String(row.id),
+    name: row.name || "",
+    email: row.email || "",
+    phone: row.phone || "",
+    businessName: row.business_name ?? row.businessName ?? "",
+    status: (row.status as LeadStatus) || "New",
+    notes: row.notes || undefined,
+    createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
+    updatedAt: row.updated_at ?? row.updatedAt ?? new Date().toISOString(),
+  };
+}
+
+function computeStats(allLeads: { status: string }[]): LeadStats {
+  const totalLeads = allLeads.length;
+  const newLeads = allLeads.filter((l) => l.status === "New").length;
+  const contactedLeads = allLeads.filter((l) => l.status === "Contacted").length;
+  const convertedLeads = allLeads.filter((l) => l.status === "Converted").length;
+  const conversionRate =
+    totalLeads > 0 ? Math.round((convertedLeads / totalLeads) * 100) : 0;
+
+  return {
+    totalLeads,
+    newLeads,
+    contactedLeads,
+    convertedLeads,
+    conversionRate,
+  };
+}
 
 function DashboardContent() {
   const { success, error: toastError, info } = useToast();
@@ -27,7 +61,7 @@ function DashboardContent() {
   const [isLoading, setIsLoading] = useState(true);
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [fetchError, setFetchError] = useState<string | null>(null);
-  const [databaseProvider, setDatabaseProvider] = useState<"supabase" | "sqlite">("sqlite");
+  const [databaseProvider, setDatabaseProvider] = useState<"supabase" | "sqlite">("supabase");
 
   // Filters & Search
   const [searchQuery, setSearchQuery] = useState("");
@@ -42,39 +76,62 @@ function DashboardContent() {
 
   const [updatingStatusId, setUpdatingStatusId] = useState<string | null>(null);
 
-  // Fetch leads from backend API
+  // Fetch leads from direct Supabase client or API route fallback
   const fetchLeads = useCallback(
     async (showRefreshIndicator = false) => {
       if (showRefreshIndicator) setIsRefreshing(true);
       setFetchError(null);
 
-      try {
-        const response = await fetch("/api/leads");
-        if (!response.ok) {
-          throw new Error(`Server returned HTTP ${response.status}`);
-        }
+      let loaded = false;
 
-        const data = await response.json();
-        if (data.success) {
-          setLeads(data.data || []);
-          if (data.stats) {
-            setStats(data.stats);
+      // 1. Direct Supabase browser client (Instant, bypasses serverless hops)
+      if (supabaseClient) {
+        try {
+          const { data, error } = await supabaseClient
+            .from("leads")
+            .select("*")
+            .order("created_at", { ascending: false });
+
+          if (!error && Array.isArray(data)) {
+            const mapped = data.map(mapRowToLead);
+            setLeads(mapped);
+            setStats(computeStats(mapped));
+            setDatabaseProvider("supabase");
+            loaded = true;
+          } else if (error) {
+            console.warn("Direct Supabase fetch returned error:", error.message);
           }
-          if (data.database) {
-            setDatabaseProvider(data.database);
-          }
-        } else {
-          throw new Error(data.error || "Failed to load leads");
+        } catch (clientErr) {
+          console.warn("Direct Supabase query failed, falling back to API route:", clientErr);
         }
-      } catch (err: unknown) {
-        console.error("Fetch error:", err);
-        const msg = err instanceof Error ? err.message : "Failed to load leads";
+      }
+
+      // 2. Fallback to API route if direct client was blocked
+      if (!loaded) {
+        try {
+          const response = await fetch("/api/leads");
+          if (response.ok) {
+            const data = await response.json();
+            if (data.success && Array.isArray(data.data)) {
+              setLeads(data.data);
+              if (data.stats) setStats(data.stats);
+              if (data.database) setDatabaseProvider(data.database);
+              loaded = true;
+            }
+          }
+        } catch (apiErr) {
+          console.error("API leads fetch failed:", apiErr);
+        }
+      }
+
+      if (!loaded) {
+        const msg = "Unable to connect to database. Please check your connection.";
         setFetchError(msg);
         toastError("Unable to load leads", msg);
-      } finally {
-        setIsLoading(false);
-        setIsRefreshing(false);
       }
+
+      setIsLoading(false);
+      setIsRefreshing(false);
     },
     [toastError]
   );
@@ -139,42 +196,109 @@ function DashboardContent() {
   }): Promise<boolean> => {
     try {
       if (editingLead) {
-        // Update existing lead
-        const res = await fetch(`/api/leads/${editingLead.id}`, {
-          method: "PATCH",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(formData),
-        });
+        let savedLead: Lead | null = null;
 
-        const data = await res.json();
-        if (!res.ok || !data.success) {
-          throw new Error(data.error || "Failed to update lead");
+        // Try direct Supabase client first
+        if (supabaseClient) {
+          try {
+            const { data, error } = await supabaseClient
+              .from("leads")
+              .update({
+                name: formData.name.trim(),
+                email: formData.email.trim().toLowerCase(),
+                phone: formData.phone.trim(),
+                business_name: formData.businessName.trim(),
+                status: formData.status,
+                notes: formData.notes?.trim() || null,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", editingLead.id)
+              .select()
+              .single();
+
+            if (!error && data) {
+              savedLead = mapRowToLead(data);
+            } else if (error) {
+              console.warn("Supabase direct update error:", error.message);
+            }
+          } catch (e) {
+            console.warn("Direct Supabase update failed, falling back to API:", e);
+          }
         }
 
-        // Optimistically update local state
-        setLeads((prev) =>
-          prev.map((l) => (l.id === editingLead.id ? data.data : l))
-        );
-        success("Lead updated successfully", `${data.data.name} details have been saved.`);
+        // Fallback to API route
+        if (!savedLead) {
+          const res = await fetch(`/api/leads/${editingLead.id}`, {
+            method: "PATCH",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(formData),
+          });
+
+          const data = await res.json();
+          if (!res.ok || !data.success) {
+            throw new Error(data.error || "Failed to update lead");
+          }
+          savedLead = data.data;
+        }
+
+        if (savedLead) {
+          setLeads((prev) =>
+            prev.map((l) => (l.id === editingLead.id ? savedLead! : l))
+          );
+          success("Lead updated successfully", `${savedLead.name} details have been saved.`);
+        }
       } else {
         // Create new lead
-        const res = await fetch("/api/leads", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(formData),
-        });
+        let createdLead: Lead | null = null;
 
-        const data = await res.json();
-        if (!res.ok || !data.success) {
-          throw new Error(data.error || "Failed to create lead");
+        // Try direct Supabase client first
+        if (supabaseClient) {
+          try {
+            const { data, error } = await supabaseClient
+              .from("leads")
+              .insert({
+                name: formData.name.trim(),
+                email: formData.email.trim().toLowerCase(),
+                phone: formData.phone.trim(),
+                business_name: formData.businessName.trim(),
+                status: formData.status || "New",
+                notes: formData.notes?.trim() || null,
+              })
+              .select()
+              .single();
+
+            if (!error && data) {
+              createdLead = mapRowToLead(data);
+            } else if (error) {
+              console.warn("Supabase direct insert error:", error.message);
+            }
+          } catch (e) {
+            console.warn("Direct Supabase insert failed, falling back to API:", e);
+          }
         }
 
-        // Add to local state
-        setLeads((prev) => [data.data, ...prev]);
-        success("Lead created successfully", `${data.data.name} has been added to your CRM.`);
+        // Fallback to API route
+        if (!createdLead) {
+          const res = await fetch("/api/leads", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify(formData),
+          });
+
+          const data = await res.json();
+          if (!res.ok || !data.success) {
+            throw new Error(data.error || "Failed to create lead");
+          }
+          createdLead = data.data;
+        }
+
+        if (createdLead) {
+          setLeads((prev) => [createdLead!, ...prev]);
+          success("Lead created successfully", `${createdLead.name} has been added to Supabase.`);
+        }
       }
 
-      // Refresh stats from backend
+      // Refresh leads & stats
       fetchLeads(false);
       return true;
     } catch (err: unknown) {
@@ -200,15 +324,33 @@ function DashboardContent() {
     );
 
     try {
-      const res = await fetch(`/api/leads/${leadId}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ status: newStatus }),
-      });
+      let updated = false;
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || "Failed to update status");
+      // Try direct Supabase client first
+      if (supabaseClient) {
+        try {
+          const { error } = await supabaseClient
+            .from("leads")
+            .update({ status: newStatus, updated_at: new Date().toISOString() })
+            .eq("id", leadId);
+          if (!error) updated = true;
+        } catch (e) {
+          console.warn("Direct Supabase status update error:", e);
+        }
+      }
+
+      // Fallback to API route
+      if (!updated) {
+        const res = await fetch(`/api/leads/${leadId}`, {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ status: newStatus }),
+        });
+
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || "Failed to update status");
+        }
       }
 
       success(
@@ -234,13 +376,31 @@ function DashboardContent() {
 
     setIsDeleting(true);
     try {
-      const res = await fetch(`/api/leads/${deletingLead.id}`, {
-        method: "DELETE",
-      });
+      let deleted = false;
 
-      const data = await res.json();
-      if (!res.ok || !data.success) {
-        throw new Error(data.error || "Failed to delete lead");
+      // Try direct Supabase client first
+      if (supabaseClient) {
+        try {
+          const { error } = await supabaseClient
+            .from("leads")
+            .delete()
+            .eq("id", deletingLead.id);
+          if (!error) deleted = true;
+        } catch (e) {
+          console.warn("Direct Supabase delete error:", e);
+        }
+      }
+
+      // Fallback to API route
+      if (!deleted) {
+        const res = await fetch(`/api/leads/${deletingLead.id}`, {
+          method: "DELETE",
+        });
+
+        const data = await res.json();
+        if (!res.ok || !data.success) {
+          throw new Error(data.error || "Failed to delete lead");
+        }
       }
 
       setLeads((prev) => prev.filter((l) => l.id !== deletingLead.id));
