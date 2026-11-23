@@ -85,33 +85,37 @@ export async function getLeads(
     }
   }
 
-  // -------- SQLITE FALLBACK --------
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const where: any = {};
-  if (status && status !== "All") where.status = status;
-  if (search) {
-    where.OR = [
-      { name: { contains: search } },
-      { email: { contains: search } },
-      { businessName: { contains: search } },
-      { phone: { contains: search } },
-    ];
+  // -------- SQLITE FALLBACK (local development) --------
+  if (process.env.DATABASE_URL) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const where: any = {};
+    if (status && status !== "All") where.status = status;
+    if (search) {
+      where.OR = [
+        { name: { contains: search } },
+        { email: { contains: search } },
+        { businessName: { contains: search } },
+        { phone: { contains: search } },
+      ];
+    }
+
+    const [prismaLeads, allPrismaLeads] = await Promise.all([
+      prisma.lead.findMany({ where, orderBy: { createdAt: "desc" } }),
+      prisma.lead.findMany({ select: { status: true } }),
+    ]);
+
+    const leads: Lead[] = prismaLeads.map((l) => ({
+      ...l,
+      status: l.status as LeadStatus,
+      createdAt: l.createdAt.toISOString(),
+      updatedAt: l.updatedAt.toISOString(),
+    }));
+
+    const stats = computeStats(allPrismaLeads);
+    return { leads, stats, provider: "sqlite" };
   }
 
-  const [prismaLeads, allPrismaLeads] = await Promise.all([
-    prisma.lead.findMany({ where, orderBy: { createdAt: "desc" } }),
-    prisma.lead.findMany({ select: { status: true } }),
-  ]);
-
-  const leads: Lead[] = prismaLeads.map((l) => ({
-    ...l,
-    status: l.status as LeadStatus,
-    createdAt: l.createdAt.toISOString(),
-    updatedAt: l.updatedAt.toISOString(),
-  }));
-
-  const stats = computeStats(allPrismaLeads);
-  return { leads, stats, provider: "sqlite" };
+  return { leads: [], stats: computeStats([]), provider: "supabase" };
 }
 
 // ==========================================
@@ -129,14 +133,18 @@ export async function getLeadById(id: string): Promise<Lead | null> {
     return mapSupabaseRowToLead(data);
   }
 
-  const lead = await prisma.lead.findUnique({ where: { id } });
-  if (!lead) return null;
-  return {
-    ...lead,
-    status: lead.status as LeadStatus,
-    createdAt: lead.createdAt.toISOString(),
-    updatedAt: lead.updatedAt.toISOString(),
-  };
+  if (process.env.DATABASE_URL) {
+    const lead = await prisma.lead.findUnique({ where: { id } });
+    if (!lead) return null;
+    return {
+      ...lead,
+      status: lead.status as LeadStatus,
+      createdAt: lead.createdAt.toISOString(),
+      updatedAt: lead.updatedAt.toISOString(),
+    };
+  }
+
+  return null;
 }
 
 // ==========================================
@@ -168,30 +176,60 @@ export async function createLead(data: {
       if (!error && inserted) {
         return mapSupabaseRowToLead(inserted);
       }
-      console.warn("Supabase createLead returned error, trying fallback:", error?.message);
+      if (error) {
+        console.error("Supabase createLead returned error:", error);
+        throw new Error(`Supabase error: ${error.message}`);
+      }
     } catch (err) {
-      console.warn("Supabase createLead exception, trying fallback:", err);
+      console.warn("Supabase createLead exception:", err);
+      // SQLite fallback only if DATABASE_URL is explicitly set
+      if (process.env.DATABASE_URL) {
+        try {
+          const created = await prisma.lead.create({
+            data: {
+              name: data.name.trim(),
+              email: data.email.trim().toLowerCase(),
+              phone: data.phone.trim(),
+              businessName: data.businessName.trim(),
+              status: data.status || "New",
+              notes: data.notes?.trim() || null,
+            },
+          });
+          return {
+            ...created,
+            status: created.status as LeadStatus,
+            createdAt: created.createdAt.toISOString(),
+            updatedAt: created.updatedAt.toISOString(),
+          };
+        } catch (prismaErr) {
+          console.error("Prisma SQLite fallback failed:", prismaErr);
+        }
+      }
+      throw err;
     }
   }
 
-  // SQLite fallback
-  const created = await prisma.lead.create({
-    data: {
-      name: data.name.trim(),
-      email: data.email.trim().toLowerCase(),
-      phone: data.phone.trim(),
-      businessName: data.businessName.trim(),
-      status: data.status || "New",
-      notes: data.notes?.trim() || null,
-    },
-  });
+  if (process.env.DATABASE_URL) {
+    const created = await prisma.lead.create({
+      data: {
+        name: data.name.trim(),
+        email: data.email.trim().toLowerCase(),
+        phone: data.phone.trim(),
+        businessName: data.businessName.trim(),
+        status: data.status || "New",
+        notes: data.notes?.trim() || null,
+      },
+    });
 
-  return {
-    ...created,
-    status: created.status as LeadStatus,
-    createdAt: created.createdAt.toISOString(),
-    updatedAt: created.updatedAt.toISOString(),
-  };
+    return {
+      ...created,
+      status: created.status as LeadStatus,
+      createdAt: created.createdAt.toISOString(),
+      updatedAt: created.updatedAt.toISOString(),
+    };
+  }
+
+  throw new Error("Unable to save lead: Supabase cloud service unavailable.");
 }
 
 // ==========================================
@@ -229,33 +267,66 @@ export async function updateLead(
       if (!error && updated) {
         return mapSupabaseRowToLead(updated);
       }
-      console.warn("Supabase updateLead returned error, trying fallback:", error?.message);
+      if (error) {
+        console.error("Supabase updateLead returned error:", error);
+        throw new Error(`Supabase error: ${error.message}`);
+      }
     } catch (err) {
-      console.warn("Supabase updateLead exception, trying fallback:", err);
+      console.warn("Supabase updateLead exception:", err);
+      if (process.env.DATABASE_URL) {
+        try {
+          // eslint-disable-next-line @typescript-eslint/no-explicit-any
+          const updatePayload: any = {};
+          if (data.name !== undefined) updatePayload.name = data.name.trim();
+          if (data.email !== undefined) updatePayload.email = data.email.trim().toLowerCase();
+          if (data.phone !== undefined) updatePayload.phone = data.phone.trim();
+          if (data.businessName !== undefined) updatePayload.businessName = data.businessName.trim();
+          if (data.status !== undefined) updatePayload.status = data.status;
+          if (data.notes !== undefined) updatePayload.notes = data.notes?.trim() || null;
+
+          const updated = await prisma.lead.update({
+            where: { id },
+            data: updatePayload,
+          });
+
+          return {
+            ...updated,
+            status: updated.status as LeadStatus,
+            createdAt: updated.createdAt.toISOString(),
+            updatedAt: updated.updatedAt.toISOString(),
+          };
+        } catch (prismaErr) {
+          console.error("Prisma update fallback failed:", prismaErr);
+        }
+      }
+      throw err;
     }
   }
 
-  // SQLite fallback
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const updatePayload: any = {};
-  if (data.name !== undefined) updatePayload.name = data.name.trim();
-  if (data.email !== undefined) updatePayload.email = data.email.trim().toLowerCase();
-  if (data.phone !== undefined) updatePayload.phone = data.phone.trim();
-  if (data.businessName !== undefined) updatePayload.businessName = data.businessName.trim();
-  if (data.status !== undefined) updatePayload.status = data.status;
-  if (data.notes !== undefined) updatePayload.notes = data.notes?.trim() || null;
+  if (process.env.DATABASE_URL) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const updatePayload: any = {};
+    if (data.name !== undefined) updatePayload.name = data.name.trim();
+    if (data.email !== undefined) updatePayload.email = data.email.trim().toLowerCase();
+    if (data.phone !== undefined) updatePayload.phone = data.phone.trim();
+    if (data.businessName !== undefined) updatePayload.businessName = data.businessName.trim();
+    if (data.status !== undefined) updatePayload.status = data.status;
+    if (data.notes !== undefined) updatePayload.notes = data.notes?.trim() || null;
 
-  const updated = await prisma.lead.update({
-    where: { id },
-    data: updatePayload,
-  });
+    const updated = await prisma.lead.update({
+      where: { id },
+      data: updatePayload,
+    });
 
-  return {
-    ...updated,
-    status: updated.status as LeadStatus,
-    createdAt: updated.createdAt.toISOString(),
-    updatedAt: updated.updatedAt.toISOString(),
-  };
+    return {
+      ...updated,
+      status: updated.status as LeadStatus,
+      createdAt: updated.createdAt.toISOString(),
+      updatedAt: updated.updatedAt.toISOString(),
+    };
+  }
+
+  throw new Error("Unable to update lead: Supabase cloud service unavailable.");
 }
 
 // ==========================================
@@ -266,13 +337,24 @@ export async function deleteLead(id: string): Promise<void> {
     try {
       const { error } = await supabaseServer.from("leads").delete().eq("id", id);
       if (!error) return;
-      console.warn("Supabase deleteLead error, trying fallback:", error.message);
+      console.error("Supabase deleteLead returned error:", error);
+      throw new Error(`Supabase error: ${error.message}`);
     } catch (err) {
-      console.warn("Supabase deleteLead exception, trying fallback:", err);
+      console.warn("Supabase deleteLead exception:", err);
+      if (process.env.DATABASE_URL) {
+        await prisma.lead.delete({ where: { id } });
+        return;
+      }
+      throw err;
     }
   }
 
-  await prisma.lead.delete({ where: { id } });
+  if (process.env.DATABASE_URL) {
+    await prisma.lead.delete({ where: { id } });
+    return;
+  }
+
+  throw new Error("Unable to delete lead: Supabase cloud service unavailable.");
 }
 
 // ==========================================
@@ -301,10 +383,14 @@ export async function seedSampleLeads(): Promise<{ count: number; provider: Data
     return { count: count || SAMPLE_LEADS.length, provider: "supabase" };
   }
 
-  await prisma.lead.deleteMany({});
-  for (const lead of SAMPLE_LEADS) {
-    await prisma.lead.create({ data: lead });
+  if (process.env.DATABASE_URL) {
+    await prisma.lead.deleteMany({});
+    for (const lead of SAMPLE_LEADS) {
+      await prisma.lead.create({ data: lead });
+    }
+    const count = await prisma.lead.count();
+    return { count, provider: "sqlite" };
   }
-  const count = await prisma.lead.count();
-  return { count, provider: "sqlite" };
+
+  return { count: 0, provider: "supabase" };
 }
