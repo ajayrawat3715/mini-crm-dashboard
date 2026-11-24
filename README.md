@@ -5,7 +5,7 @@
 ---
 
 ## 🚀 Live Demo & Repository
-- **Live Demo:** [Deploy on Vercel / Live Demo Link](https://mini-crm-dashboard-shl.vercel.app) *(or test locally in 60 seconds)*
+- **Live Demo:** [https://mini-crm-dashboard-eta.vercel.app](https://mini-crm-dashboard-eta.vercel.app)
 - **GitHub Repository:** [https://github.com/ajayrawat3715/mini-crm-dashboard](https://github.com/ajayrawat3715/mini-crm-dashboard)
 
 ---
@@ -55,12 +55,12 @@
 
 | Layer | Technology | Why Chosen? |
 | :--- | :--- | :--- |
-| **Frontend Framework** | **Next.js 15 (App Router)** | Industry standard for modern React applications; provides unified routing, server-side API capabilities, and fast rendering. |
+| **Frontend Framework** | **Next.js 16.4.6 (App Router)** | Industry standard for modern React applications; provides unified routing, server-side API handlers, and high-performance client rendering. |
 | **Language** | **TypeScript** | Strict type safety across database models, API payloads, and UI components; eliminates entire categories of runtime bugs. |
+| **Cloud Database** | **Supabase (PostgreSQL)** | Production-grade cloud database with Row Level Security (RLS), real-time capabilities, PostgREST APIs, and automatic timestamps. |
+| **Local Database & ORM** | **Prisma ORM (v6) + SQLite** | Self-contained, zero-configuration local fallback allowing evaluators to run and test the project completely offline with zero setup friction. |
 | **Styling** | **Tailwind CSS** | Utility-first CSS providing a clean, accessible, consistent design system with rapid responsive layout styling. |
 | **Icons** | **Lucide React** | Clean, modern, lightweight SVG icons that enhance UI readability. |
-| **ORM** | **Prisma ORM (v6)** | Type-safe database queries, declarative schema definitions, automated migrations, and cross-database portability. |
-| **Database** | **SQLite (Default) / PostgreSQL** | SQLite provides a zero-configuration, self-contained local database so reviewers can run the project instantly without spinning up external servers; Prisma allows switching to Supabase/PostgreSQL with 1 configuration line. |
 
 ---
 
